@@ -12,7 +12,19 @@ simplefs 1.0 Architecture + Notes
 ---------------------------------
 
 Block Zero = Super block
-Block One = Inode store
+Begin Block One = Inode store
+End of Inode Store = Free Inode Bitmaps
+End of Inode Bitmaps = Free Block Bitmaps
+End of Block Bitmaps = Free Blocks
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++		+				+		+		+
++Super Block	+Inode table			+(inode bitmaps)+ Block Bitmaps	+Data Blocks....
++		+				+	....	+	....	+
++(Block 0)	+(Begins block 1)		+		+		+
++		+				+		+		+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
 Block Two = Occupied by the initial file that is created as part of the mkfs.
 
 Only a limited number of filesystem objects are supported.

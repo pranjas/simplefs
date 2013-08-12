@@ -9,10 +9,19 @@
 
 #include "simple.h"
 
+#define VERSION			1
+#define DEFAULT_PERC_INODES	10
+
 int main(int argc, char *argv[])
 {
-	int fd, nbytes;
+	int fd, nbytes,i;
+	uint64_t nr_blocks;
+	uint64_t nr_inodes;
+	uint16_t nr_inodes_per_block;
+	uint16_t nr_bits_per_block;
+
 	ssize_t ret;
+	struct stat devinfo;
 	struct simplefs_super_block sb;
 	struct simplefs_inode root_inode;
 	struct simplefs_inode welcomefile_inode;
@@ -21,6 +30,7 @@ int main(int argc, char *argv[])
 	char welcomefile_body[] = "Love is God. God is Love. Anbe Murugan.\n";
 	const uint64_t WELCOMEFILE_INODE_NUMBER = 2;
 	const uint64_t WELCOMEFILE_DATABLOCK_NUMBER = 3;
+	char *buffer = NULL;
 
 	char *block_padding;
 
@@ -31,14 +41,28 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	if(lstat(argv[1],&devinfo)) {
+		perror("Error geting device information\n");
+		return EXIT_FAILURE;
+	}
+
+	if( !(devinfo->st_mode & S_IFBLK) ) {
+		printf("%s not a block device!. Exiting...\n",argv[1]);
+		return EXIT_FAILURE;
+	}
+
 	fd = open(argv[1], O_RDWR);
-	if (fd == -1) {
+	if (fd < 0) {
 		perror("Error opening the device");
 		return -1;
 	}
 
 	/* Begin writing of Block 0 - Super Block */
-	sb.version = 1;
+#ifdef __BIG_ENDIAN__
+	sb.version = cpu_to_le((VERSION<<1)|SIMPLEFS_ENDIANESS_BIG,32);
+#else
+	sb.version = (VERSION<<1)|SIMPLEFS_ENDIANESS_LITTLE;
+#endif
 	sb.magic = SIMPLEFS_MAGIC;
 	sb.block_size = SIMPLEFS_DEFAULT_BLOCK_SIZE;
 
@@ -48,6 +72,16 @@ int main(int argc, char *argv[])
 	/* FIXME: Free blocks management is not implemented yet */
 	sb.free_blocks = ~0;
 	sb.free_blocks &= ~(1 << WELCOMEFILE_DATABLOCK_NUMBER);
+
+	nr_blocks = devinfo.st_size / sb.block_size;
+	nr_inodes = nr_blocks/DEFAULT_PREC_INODES;
+	nr_bits_per_block = sb.block_size * 8;
+	nr_inodes_per_block = sb.block_size / sizeof(struct simplefs_inode);
+	buffer = calloc(1,sb.block_size);
+	if(!buffer) {
+		printf("Couldn't allocate enough memory. Exiting...\n");
+		return EXIT_FAILURE;
+	}
 
 	ret = write(fd, (char *)&sb, sizeof(sb));
 
@@ -62,8 +96,38 @@ int main(int argc, char *argv[])
 	printf("Super block written succesfully\n");
 	/* End of writing of Block 0 - Super block */
 
-	/* Begin writing of Block 1 - Inode Store */
+	/* Skip the inode table and move on to write the
+	 * inode bitmap.
+	 * */
+	if (lseek(fd,
+		(nr_inodes/nr_inodes_per_block+
+		 (nr_inodes % (nr_inodes_per_blocks )?1:0))*sb.block_size,SEEK_CUR) ) {
 
+		perror("Error seeking to device \n");
+		goto exit;
+	}
+	/*Begin Writing inode bitmap table*/
+	i = nr_inodes/nr_bits_per_block;
+	do {
+		if( (ret = write(fd,buffer,sb.block_size))!= sb.block_size) {
+			perror("Error writing inode bitmap to device.\n");
+			goto exit;
+		}
+		
+		i -=nr_bits_per_block;
+	}while(i>0);
+
+	/*Begin Writing the block bitmap table*/
+	i = nr_blocks/nr_bits_per_block;
+	do {
+		if ( (ret = write(fd,buffer,sb.block_size)) != sb.block_size) {
+			perror("Error writing block bitmap table");
+			goto exit;
+		}
+		i -= nr_bits_per_block;
+	}while(i>0);
+
+	/* Begin writing of Block 1 - Inode Store */
 	root_inode.mode = S_IFDIR;
 	root_inode.inode_no = SIMPLEFS_ROOTDIR_INODE_NUMBER;
 	root_inode.data_block_number = SIMPLEFS_ROOTDIR_DATABLOCK_NUMBER;
@@ -155,5 +219,6 @@ int main(int argc, char *argv[])
 
 exit:
 	close(fd);
+	free(buffer);
 	return ret;
 }
