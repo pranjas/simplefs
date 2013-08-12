@@ -2,6 +2,7 @@
  * A Simple Filesystem for the Linux Kernel.
  *
  * Initial author: Sankar P <sankar.curiosity@gmail.com>
+ * Modified By : Pranay Kr. Srivastava
  * License: Creative Commons Zero License - http://creativecommons.org/publicdomain/zero/1.0/
  */
 
@@ -11,8 +12,14 @@
 #include <linux/buffer_head.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/version.h>
 
 #include "super.h"
+#include "simple_fs.h"
+
+#define INODE_CACHE_NAME "simplefs_inode_cache"
+
+static int nr_mounts = 0;
 
 /* A super block lock that must be used for any critical section operation on the sb,
  * such as: updating the free_blocks, inodes_count etc. */
@@ -385,23 +392,43 @@ ssize_t simplefs_write(struct file * filp, const char __user * buf, size_t len,
 }
 
 const struct file_operations simplefs_file_operations = {
-	.read = simplefs_read,
+/*	.read = simplefs_read,
 	.write = simplefs_write,
+	*/
+	.aio_read = generic_file_aio_read,
+	.aio_write = generic_file_aio_write,
+	.llseek = generic_file_llseek,
+	.mmap = generic_file_mmap,
+	.owner = THIS_MODULE
 };
 
 const struct file_operations simplefs_dir_operations = {
 	.owner = THIS_MODULE,
 	.readdir = simplefs_readdir,
+	.read = generic_read_dir,
+	.llseek = generic_file_llseek,
+
 };
 
-struct dentry *simplefs_lookup(struct inode *parent_inode,
-			       struct dentry *child_dentry, unsigned int flags);
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
 static int simplefs_create(struct inode *dir, struct dentry *dentry,
 			   umode_t mode, bool excl);
 
 static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
 			  umode_t mode);
+
+struct dentry *simplefs_lookup(struct inode *parent_inode,
+			       struct dentry *child_dentry, unsigned int flags);
+#else
+static int simplefs_create(struct inode *dir, struct dentry *dentry,
+			   int mode, struct nameidata *excl);
+
+static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
+			  int flags);
+
+struct dentry *simplefs_lookup(struct inode *parent_inode,
+			       struct dentry *child_dentry, struct nameidata *nameidata);
+#endif
 
 static struct inode_operations simplefs_inode_ops = {
 	.create = simplefs_create,
@@ -571,8 +598,10 @@ static int simplefs_create_fs_object(struct inode *dir, struct dentry *dentry,
 	return 0;
 }
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
 static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
-			  umode_t mode)
+			  unmode_t mode)
 {
 	/* I believe this is a bug in the kernel, for some reason, the mkdir callback
 	 * does not get the S_IFDIR flag set. Even ext2 sets is explicitly */
@@ -590,8 +619,8 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 {
 	struct simplefs_inode *parent = SIMPLEFS_INODE(parent_inode);
 	struct super_block *sb = parent_inode->i_sb;
-	struct buffer_head *bh;
 	struct simplefs_dir_record *record;
+	struct buffer_head *bh = NULL;
 	int i;
 
 	bh = (struct buffer_head *)sb_bread(sb, parent->data_block_number);
@@ -643,6 +672,103 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 
 	return NULL;
 }
+#else
+static int simplefs_create(struct inode *dir, struct dentry *dentry,
+			   int mode, struct nameidata *excl)
+{
+	return simplefs_create_fs_object(dir, dentry, mode);
+}
+
+static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
+			  int mode)
+{
+	/* I believe this is a bug in the kernel, for some reason, the mkdir callback
+	 * does not get the S_IFDIR flag set. Even ext2 sets is explicitly */
+	return simplefs_create_fs_object(dir, dentry, S_IFDIR | mode);
+}
+
+struct dentry *simplefs_lookup(struct inode *parent_inode,
+			       struct dentry *child_dentry, struct nameidata *nameidata)
+{
+	struct simplefs_inode *parent = SIMPLEFS_INODE(parent_inode);
+	struct super_block *sb = parent_inode->i_sb;
+	struct simplefs_dir_record *record;
+	struct buffer_head *bh = NULL;
+	int i;
+
+	bh = (struct buffer_head *)sb_bread(sb, parent->data_block_number);
+	record = (struct simplefs_dir_record *)bh->b_data;
+	for (i = 0; i < parent->dir_children_count; i++) {
+		if (!strcmp(record->filename, child_dentry->d_name.name)) {
+			/* FIXME: There is a corner case where if an allocated inode,
+			 * is not written to the inode store, but the inodes_count is
+			 * incremented. Then if the random string on the disk matches
+			 * with the filename that we are comparing above, then we
+			 * will use an invalid unintialized inode */
+
+			struct inode *inode;
+			struct simplefs_inode *sfs_inode;
+
+			/* FIXME: This simplefs_inode is leaking */
+			sfs_inode = simplefs_get_inode(sb, record->inode_no);
+
+			/* FIXME: This inode is leaking */
+			inode = new_inode(sb);
+			inode->i_ino = record->inode_no;
+			inode_init_owner(inode, parent_inode, sfs_inode->mode);
+			inode->i_sb = sb;
+			inode->i_op = &simplefs_inode_ops;
+
+			if (S_ISDIR(inode->i_mode))
+				inode->i_fop = &simplefs_dir_operations;
+			else if (S_ISREG(inode->i_mode))
+				inode->i_fop = &simplefs_file_operations;
+			else
+				printk(KERN_ERR
+				       "Unknown inode type. Neither a directory nor a file");
+
+			/* FIXME: We should store these times to disk and retrieve them */
+			inode->i_atime = inode->i_mtime = inode->i_ctime =
+			    CURRENT_TIME;
+
+			inode->i_private = sfs_inode;
+
+			d_add(child_dentry, inode);
+			return NULL;
+		}
+		record++;
+	}
+
+	printk(KERN_ERR
+	       "No inode found for the filename [%s]\n",
+	       child_dentry->d_name.name);
+
+	return NULL;
+
+}
+
+#endif
+
+struct simplefs_inode* simplefs_read_inode(uint64_t inode_no,struct super_block *sb) 
+{
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
+	int inodes_per_block = SIMPLEFS_INODE_SIZE/msblk->sb.block_size;
+	struct simplefs_inode *inode = NULL;
+try_again:
+	 inode = 
+		(struct simplefs_inode*)(msblk->inode_table[(inode_no - 1)/inodes_per_block]->b_data);
+	if(!inode) {
+		/*
+		 * One more shot at reading the buffer head of inode table
+		 * */
+		msblk->inode_table[ (inode_no - 1)/inodes_per_block ] = 
+			sb_bread(sb,msblk->sb.inode_block_start + (inode_no - 1)/inodes_per_block);
+		if (!msblk->inode_table [ (inode_no - 1)/inodes_per_block ])
+			return NULL;
+		goto try_again;
+	}		
+	return inode + ((inode_no - 1)%inodes_per_block);
+}
 
 /* This function, as the name implies, Makes the super_block valid and
  * fills filesystem specific information in the super block */
@@ -650,56 +776,153 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct inode *root_inode;
 	struct buffer_head *bh;
-	struct simplefs_super_block *sb_disk;
+	struct simple_fs_sb_i *msblk;
+	struct simple_fs_inode_i *mroot_inode;
+	struct simplefs_inode *dummy_inode;
+	static char inode_cache_name[sizeof(INODE_CACHE_NAME) + 4 ];
+	int j = 0;
+	int blocks_per_buffer;
 
-	bh = (struct buffer_head *)sb_bread(sb,
-					    SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
+	bh = sb_bread(sb,SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
 
-	sb_disk = (struct simplefs_super_block *)bh->b_data;
-	/* FIXME: bh->b_data is probably leaking */
+	if (!bh)
+		goto failed;
+	msblk = kzalloc(sizeof(struct simple_fs_sb_i),GFP_KERNEL);
+
+	if (!msblk)
+		goto fail_bh;
+	memcpy(&msblk->sb,bh->b_data,sizeof(struct simplefs_super_block));
+	if( !(msblk->sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE)) {
+		/*
+		 * Decides wether to work with big endian/
+		 * little endianess.
+		 * */
+		super_to_cpu(le,&msblk->sb);
+	}
 
 	printk(KERN_INFO "The magic number obtained in disk is: [%llu]\n",
-	       sb_disk->magic);
+	       msblk->sb.magic);
 
-	if (unlikely(sb_disk->magic != SIMPLEFS_MAGIC)) {
+	if (unlikely(msblk->sb.magic != SIMPLEFS_MAGIC)) {
 		printk(KERN_ERR
 		       "The filesystem that you try to mount is not of type simplefs. Magicnumber mismatch.");
 		return -EPERM;
 	}
 
-	if (unlikely(sb_disk->block_size != SIMPLEFS_DEFAULT_BLOCK_SIZE)) {
+	if (unlikely(msblk->sb.block_size != SIMPLEFS_DEFAULT_BLOCK_SIZE)) {
 		printk(KERN_ERR
 		       "simplefs seem to be formatted using a non-standard block size.");
 		return -EPERM;
 	}
+	snprintf(inode_cache_name,sizeof(inode_cache_name) - 1
+			,"%s%d",INODE_CACHE_NAME,++nr_mounts);
+	msblk->inode_cachep = kmem_cache_create(inode_cache_name,
+				sizeof(struct simple_fs_inode_i),0,
+				SLAB_HWCACHE_ALIGN,NULL);
+	if(!msblk->inode_cachep)
+		goto fail_sb;
 
 	printk(KERN_INFO
-	       "simplefs filesystem of version [%llu] formatted with a block size of [%llu] detected in the device.\n",
-	       sb_disk->version, sb_disk->block_size);
+	       "simplefs filesystem of version [%u] formatted with a block size of [%u] detected in the device.\n",
+	       msblk->sb.char_version[0], msblk->sb.block_size);
 
 	/* A magic number that uniquely identifies our filesystem type */
 	sb->s_magic = SIMPLEFS_MAGIC;
 
 	/* For all practical purposes, we will be using this s_fs_info as the super block */
-	sb->s_fs_info = sb_disk;
+	sb->s_fs_info = msblk;
+	sb->s_op = &simplefs_sops;
+	blocks_per_buffer = msblk->sb.block_size >> PAGE_SHIFT;
+		
+	msblk->inode_table =
+	       	kcalloc( (msblk->sb.inode_bitmap_start
+		       	- msblk->sb.inode_block_start) / blocks_per_buffer
+				,sizeof(void*),GFP_KERNEL);
+	msblk->inode_bitmap = 
+		kcalloc( (msblk->sb.block_bitmap_start
+			- msblk->sb.inode_bitmap_start) / blocks_per_buffer,
+				sizeof(void*),GFP_KERNEL);
+	msblk->block_bitmap = 
+		kcalloc( (msblk->sb.data_block_start 
+			- msblk->sb.block_bitmap_start) / blocks_per_buffer,
+				sizeof(void*),GFP_KERNEL);
+	if (!msblk->inode_table || !msblk->inode_bitmap || !msblk->block_bitmap){
+		goto fail_buffers;
+	}
+	for (j=0;
+		j < (msblk->sb.inode_bitmap_start 
+			- msblk->sb.inode_block_start)/blocks_per_buffer;j++) {
+		/*
+		 * Read in all the buffer heads for inode table
+		 * 
+		 * */
+		msblk->inode_table[j] = sb_bread(sb,msblk->sb.inode_block_start + j);
+		/*
+		 * Don't do anything yet if we are not able to read the meta
+		 * data for inode table. If it's already screwed up then you shouldn't
+		 * be mounting it in the first place. So we'll do our best what we can
+		 * to read data.
+		 * */		
+	}
+	for (j=0;
+		j < (msblk->sb.block_bitmap_start 
+			- msblk->sb.inode_bitmap_start) / blocks_per_buffer;j++) {
+		msblk->inode_bitmap[j] = sb_bread(sb,msblk->sb.inode_bitmap_start + j);
+	}
+	for(j=0;
+		j < (msblk->sb.data_block_start
+			- msblk->sb.block_bitmap_start) / blocks_per_buffer;j++) {
+		msblk->block_bitmap[j] = sb_bread(sb,msblk->sb.block_bitmap_start);
+	}
 
 	root_inode = new_inode(sb);
+	if (!root_inode) {
+		goto fail_buffers;
+	}
+	mroot_inode = SIMPLEFS_INODE(root_inode);
+	dummy_inode = simplefs_read_inode(SIMPLEFS_ROOTDIR_INODE_NUMBER,sb);
+	
+	if (!dummy_inode)
+		goto fail_inode;
+
+	memcpy(&mroot_inode->inode,dummy_inode,
+			SIMPLEFS_INODE_SIZE);
 	root_inode->i_ino = SIMPLEFS_ROOTDIR_INODE_NUMBER;
 	inode_init_owner(root_inode, NULL, S_IFDIR);
 	root_inode->i_sb = sb;
 	root_inode->i_op = &simplefs_inode_ops;
 	root_inode->i_fop = &simplefs_dir_operations;
-	root_inode->i_atime = root_inode->i_mtime = root_inode->i_ctime =
-	    CURRENT_TIME;
+	root_inode->i_atime = root_inode->i_mtime =  
+		ns_to_timespec(mroot_inode->inode.m_time);
+	root_inode->i_ctime = ns_to_timespec(mroot_inode->inode.c_time);
 
-	root_inode->i_private =
+/*	root_inode->i_private =
 	    simplefs_get_inode(sb, SIMPLEFS_ROOTDIR_INODE_NUMBER);
-
+	    */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
 	sb->s_root = d_make_root(root_inode);
+#else
+	sb->s_root = d_alloc_root(root_inode);
+#endif
 	if (!sb->s_root)
-		return -ENOMEM;
-
+		goto fail_inode;
+	mutex_init(&msblk->sb_mutex);
+	bforget(bh);
 	return 0;
+fail_inode:
+	kmem_cache_free(msblk->inode_cachep,mroot_inode);
+fail_buffers:
+	kfree(msblk->inode_table);
+	kfree(msblk->inode_bitmap);
+	kfree(msblk->block_bitmap);
+	kmem_cache_destroy(msblk->inode_cachep);
+fail_sb:
+	kfree(msblk);
+fail_bh:
+	bforget(bh);
+failed:
+	return -ENOMEM;
+
 }
 
 static struct dentry *simplefs_mount(struct file_system_type *fs_type,
@@ -766,3 +989,4 @@ module_exit(simplefs_exit);
 
 MODULE_LICENSE("CC0");
 MODULE_AUTHOR("Sankar P");
+MODULE_AUTHOR("Pranay Kr. Srivastava");
