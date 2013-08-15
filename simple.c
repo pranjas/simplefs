@@ -11,6 +11,7 @@
 #include <linux/buffer_head.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/version.h>
 
 #include "super.h"
 
@@ -394,14 +395,25 @@ const struct file_operations simplefs_dir_operations = {
 	.readdir = simplefs_readdir,
 };
 
-struct dentry *simplefs_lookup(struct inode *parent_inode,
-			       struct dentry *child_dentry, unsigned int flags);
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
 static int simplefs_create(struct inode *dir, struct dentry *dentry,
 			   umode_t mode, bool excl);
 
 static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
 			  umode_t mode);
+
+struct dentry *simplefs_lookup(struct inode *parent_inode,
+			       struct dentry *child_dentry, unsigned int flags);
+#else
+static int simplefs_create(struct inode *dir, struct dentry *dentry,
+			   int mode, struct nameidata *excl);
+
+static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
+			  int flags);
+
+struct dentry *simplefs_lookup(struct inode *parent_inode,
+			       struct dentry *child_dentry, struct nameidata *nameidata);
+#endif
 
 static struct inode_operations simplefs_inode_ops = {
 	.create = simplefs_create,
@@ -571,8 +583,10 @@ static int simplefs_create_fs_object(struct inode *dir, struct dentry *dentry,
 	return 0;
 }
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
 static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
-			  umode_t mode)
+			  unmode_t mode)
 {
 	/* I believe this is a bug in the kernel, for some reason, the mkdir callback
 	 * does not get the S_IFDIR flag set. Even ext2 sets is explicitly */
@@ -590,8 +604,8 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 {
 	struct simplefs_inode *parent = SIMPLEFS_INODE(parent_inode);
 	struct super_block *sb = parent_inode->i_sb;
-	struct buffer_head *bh;
 	struct simplefs_dir_record *record;
+	struct buffer_head *bh = NULL;
 	int i;
 
 	bh = (struct buffer_head *)sb_bread(sb, parent->data_block_number);
@@ -643,6 +657,82 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 
 	return NULL;
 }
+#else
+static int simplefs_create(struct inode *dir, struct dentry *dentry,
+			   int mode, struct nameidata *excl)
+{
+	return simplefs_create_fs_object(dir, dentry, mode);
+}
+
+static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
+			  int mode)
+{
+	/* I believe this is a bug in the kernel, for some reason, the mkdir callback
+	 * does not get the S_IFDIR flag set. Even ext2 sets is explicitly */
+	return simplefs_create_fs_object(dir, dentry, S_IFDIR | mode);
+}
+
+struct dentry *simplefs_lookup(struct inode *parent_inode,
+			       struct dentry *child_dentry, struct nameidata *nameidata)
+{
+	struct simplefs_inode *parent = SIMPLEFS_INODE(parent_inode);
+	struct super_block *sb = parent_inode->i_sb;
+	struct simplefs_dir_record *record;
+	struct buffer_head *bh = NULL;
+	int i;
+
+	bh = (struct buffer_head *)sb_bread(sb, parent->data_block_number);
+	record = (struct simplefs_dir_record *)bh->b_data;
+	for (i = 0; i < parent->dir_children_count; i++) {
+		if (!strcmp(record->filename, child_dentry->d_name.name)) {
+			/* FIXME: There is a corner case where if an allocated inode,
+			 * is not written to the inode store, but the inodes_count is
+			 * incremented. Then if the random string on the disk matches
+			 * with the filename that we are comparing above, then we
+			 * will use an invalid unintialized inode */
+
+			struct inode *inode;
+			struct simplefs_inode *sfs_inode;
+
+			/* FIXME: This simplefs_inode is leaking */
+			sfs_inode = simplefs_get_inode(sb, record->inode_no);
+
+			/* FIXME: This inode is leaking */
+			inode = new_inode(sb);
+			inode->i_ino = record->inode_no;
+			inode_init_owner(inode, parent_inode, sfs_inode->mode);
+			inode->i_sb = sb;
+			inode->i_op = &simplefs_inode_ops;
+
+			if (S_ISDIR(inode->i_mode))
+				inode->i_fop = &simplefs_dir_operations;
+			else if (S_ISREG(inode->i_mode))
+				inode->i_fop = &simplefs_file_operations;
+			else
+				printk(KERN_ERR
+				       "Unknown inode type. Neither a directory nor a file");
+
+			/* FIXME: We should store these times to disk and retrieve them */
+			inode->i_atime = inode->i_mtime = inode->i_ctime =
+			    CURRENT_TIME;
+
+			inode->i_private = sfs_inode;
+
+			d_add(child_dentry, inode);
+			return NULL;
+		}
+		record++;
+	}
+
+	printk(KERN_ERR
+	       "No inode found for the filename [%s]\n",
+	       child_dentry->d_name.name);
+
+	return NULL;
+
+}
+
+#endif
 
 /* This function, as the name implies, Makes the super_block valid and
  * fills filesystem specific information in the super block */
@@ -694,8 +784,11 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 
 	root_inode->i_private =
 	    simplefs_get_inode(sb, SIMPLEFS_ROOTDIR_INODE_NUMBER);
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
 	sb->s_root = d_make_root(root_inode);
+#else
+	sb->s_root = d_alloc_root(root_inode);
+#endif
 	if (!sb->s_root)
 		return -ENOMEM;
 

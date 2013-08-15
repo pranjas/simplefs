@@ -79,6 +79,11 @@ struct simplefs_super_block {
 	char padding[SIMPLEFS_DEFAULT_BLOCK_SIZE - (9 * sizeof(uint64_t))];
 };
 
+struct simplefs_super_block_inode_info {
+	struct simplefs_super_block *sb_on_disk;
+	struct buffer_head **bh; /* Allocate this on the fly*/
+};
+
 #define cpu_super_to(endianess,sb)\
 	({\
 		sb->magic = cpu_to_##endianess(sb->magic,64);\
