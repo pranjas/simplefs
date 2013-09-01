@@ -2,6 +2,7 @@
  * A Simple Filesystem for the Linux Kernel.
  *
  * Initial author: Sankar P <sankar.curiosity@gmail.com>
+ * Modified By : Pranay Kr. Srivastava
  * License: Creative Commons Zero License - http://creativecommons.org/publicdomain/zero/1.0/
  */
 
@@ -14,6 +15,7 @@
 #include <linux/version.h>
 
 #include "super.h"
+#include "simple_fs.h"
 
 /* A super block lock that must be used for any critical section operation on the sb,
  * such as: updating the free_blocks, inodes_count etc. */
@@ -740,38 +742,56 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct inode *root_inode;
 	struct buffer_head *bh;
-	struct simplefs_super_block *sb_disk;
+	struct simple_fs_sb_i *msblk;
 
 	bh = (struct buffer_head *)sb_bread(sb,
 					    SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
 
-	sb_disk = (struct simplefs_super_block *)bh->b_data;
-	/* FIXME: bh->b_data is probably leaking */
+	if (!bh)
+		goto failed;
+	msblk = kmalloc(sizeof(struct simple_fs_sb_i),GFP_KERNEL);
+
+	if (!msblk)
+		goto fail_bh;
+	memcpy(&msblk->sb,bh->b_data,sizeof(struct simplefs_super_block));
+	if( !(msblk->sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE)) {
+		/*
+		 * Decides wether to work with big endian/
+		 * little endianess.
+		 * */
+		super_to_cpu(le,&msblk->sb);
 
 	printk(KERN_INFO "The magic number obtained in disk is: [%llu]\n",
-	       sb_disk->magic);
+	       msblk->sb.magic);
 
-	if (unlikely(sb_disk->magic != SIMPLEFS_MAGIC)) {
+	if (unlikely(msblk->sb.magic != SIMPLEFS_MAGIC)) {
 		printk(KERN_ERR
 		       "The filesystem that you try to mount is not of type simplefs. Magicnumber mismatch.");
 		return -EPERM;
 	}
 
-	if (unlikely(sb_disk->block_size != SIMPLEFS_DEFAULT_BLOCK_SIZE)) {
+	if (unlikely(msblk->sb.block_size != SIMPLEFS_DEFAULT_BLOCK_SIZE)) {
 		printk(KERN_ERR
 		       "simplefs seem to be formatted using a non-standard block size.");
 		return -EPERM;
 	}
 
+	msblk->inode_cachep = kmem_cache_create("simplefs_inode_cache",
+				sizeof(struct simple_fs_inode_i),0,
+				SLAB_HWCACHE_ALIGN,NULL);
+	if(!msblk->inode_cachep)
+		goto fail_sb;
+
 	printk(KERN_INFO
-	       "simplefs filesystem of version [%llu] formatted with a block size of [%llu] detected in the device.\n",
-	       sb_disk->version, sb_disk->block_size);
+	       "simplefs filesystem of version [%u] formatted with a block size of [%u] detected in the device.\n",
+	       msblk->sb_disk.char_version[0], sb_disk->block_size);
 
 	/* A magic number that uniquely identifies our filesystem type */
 	sb->s_magic = SIMPLEFS_MAGIC;
 
 	/* For all practical purposes, we will be using this s_fs_info as the super block */
-	sb->s_fs_info = sb_disk;
+	sb->s_fs_info = msblk;
+	sb->s_ops = &simplefs_sops;
 
 	root_inode = new_inode(sb);
 	root_inode->i_ino = SIMPLEFS_ROOTDIR_INODE_NUMBER;
@@ -791,8 +811,15 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 #endif
 	if (!sb->s_root)
 		return -ENOMEM;
-
+	bforget(bh);
 	return 0;
+fail_sb:
+	kfree(msblk);
+fail_bh:
+	bforget(bh);
+failed:
+	return -ENOMEM;
+
 }
 
 static struct dentry *simplefs_mount(struct file_system_type *fs_type,

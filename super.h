@@ -1,11 +1,12 @@
-#include <simple.h>
-
-static inline struct simplefs_super_block *SIMPLEFS_SB(struct super_block *sb)
+#include <linux/fs.h>
+#include "simple.h"
+static inline struct simple_fs_sb_i *SIMPLEFS_SB(struct super_block *sb)
 {
 	return sb->s_fs_info;
 }
 
-static inline struct simplefs_inode *SIMPLEFS_INODE(struct inode *inode)
+static inline struct simple_fs_inode_i *SIMPLEFS_INODE(struct inode *inode)
 {
-	return inode->i_private;
+	return container_of(inode,struct simple_fs_inode_i,vfs_inode);
 }
+extern struct super_operations simplefs_sops;

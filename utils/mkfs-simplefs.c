@@ -13,7 +13,7 @@
 #include <inttypes.h>
 #include <linux/fs.h>
 
-#define VERSION			1
+#define VERSION			2
 #define DEFAULT_PERC_INODES	10
 
 #define SIMPLEFS_INODE_SIZE	(sizeof(struct simplefs_inode))
@@ -41,6 +41,9 @@ int main(int argc, char *argv[])
 	char *buffer = NULL;
 
 	struct simplefs_dir_record record;
+	printf(" mkfs-simplefs\n Version %d\n Author: Pranay Kr. Srivastava\n",VERSION);
+	printf(" ----------------------------------------------------------------------\n");
+	printf(" Setting block size to %d\n",SIMPLEFS_DEFAULT_BLOCK_SIZE); 
 
 	if (argc != 2) {
 		printf("Usage: mkfs-simplefs <device>\n");
@@ -64,10 +67,10 @@ int main(int argc, char *argv[])
 	}
 
 	/* Begin writing of Block 0 - Super Block */
-#ifdef __BIG_ENDIAN__
-	sb.version = cpu_to_le((VERSION<<1)|SIMPLEFS_ENDIANESS_BIG,32);
+#ifdef __BIG_ENDIAN_
+	sb.char_version[0] = SIMPLEFS_ENDIANESS_BIG;
 #else
-	sb.version = (VERSION<<1)|SIMPLEFS_ENDIANESS_LITTLE;
+	sb.char_version[0] = SIMPLEFS_ENDIANESS_LITTLE;
 #endif
 	sb.magic = SIMPLEFS_MAGIC;
 	sb.block_size = SIMPLEFS_DEFAULT_BLOCK_SIZE;
@@ -157,12 +160,16 @@ int main(int argc, char *argv[])
 	root_inode.inode_no = SIMPLEFS_ROOTDIR_INODE_NUMBER;
 	root_inode.data_block_number = /*SIMPLEFS_ROOTDIR_DATABLOCK_NUMBER*/nr_blocks_written++;
 	root_inode.dir_children_count = 1;
+	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE))
+		cpu_inode_to(le,&root_inode);
 	memcpy(buffer,&root_inode,SIMPLEFS_INODE_SIZE);
 
 	welcomefile_inode.mode = S_IFREG;
 	welcomefile_inode.inode_no = WELCOMEFILE_INODE_NUMBER;
 	welcomefile_inode.data_block_number = nr_blocks_written++;
 	welcomefile_inode.file_size = sizeof(welcomefile_body);
+	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE))
+		cpu_inode_to(le,&welcomefile_inode);
 	memcpy(buffer+SIMPLEFS_INODE_SIZE,&welcomefile_inode,SIMPLEFS_INODE_SIZE);
 
 	ret = write(fd,buffer,sb.block_size);
@@ -232,6 +239,9 @@ int main(int argc, char *argv[])
 	strcpy(record.filename, welcomefile_name);
 	record.inode_no = WELCOMEFILE_INODE_NUMBER;
 	record.name_len = strlen(record.filename);
+	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE)) {
+		record.inode_no = cpu_to_le(record.inode_no,64);
+	}
 	nbytes = sizeof(record);
 	memcpy(buffer,&record,dir_record_len(&record));
 
@@ -270,6 +280,9 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 	memset(buffer,0,sb.block_size);
+	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE)) {
+		cpu_super_to(le,&sb);
+	}
 	memcpy(buffer,&sb,sizeof(sb));
 	if ( (ret = write(fd,buffer,sb.block_size)) != sb.block_size) {
 		printf ("Couldn't complete write of super block"
@@ -278,6 +291,9 @@ int main(int argc, char *argv[])
 	}
 	/* End of writing of Block 3 - Welcome file contents */
 	ret = 0;
+	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE)) {
+		super_to_cpu(le,&sb);
+	}
 	printf ("Total blocks on device %s = %zd\n",argv[1],nr_blocks);
 	printf ("Total inodes on device %s = %zd\n",argv[1],nr_inodes);
 	printf ("Free blocks available on device %s = %zd\n",argv[1],sb.free_blocks);

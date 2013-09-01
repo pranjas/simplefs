@@ -9,13 +9,13 @@
 #include <endian.h>
 #define cpu_to_be(val,X)	htobe##X(val)
 #define cpu_to_le(val,X)	htole##X(val)
-#define be_to_cpu(val,X)	be##Xtoh(val)
-#define le_to_cpu(val,X)	le##Xtoh(val)
+#define be_to_cpu(val,X)	be##X##toh(val)
+#define le_to_cpu(val,X)	le##X##toh(val)
 #else
 #define cpu_to_be(val,X)	cpu_to_be##X(val)
 #define cpu_to_le(val,X)	cpu_to_le##X(val)
-#define le_to_cpu(val,X)	le##X_to_cpu(val)
-#define be_to_cpu(val,X)	be##X_to_cpu(val)
+#define le_to_cpu(val,X)	le##X##_to_cpu(val)
+#define be_to_cpu(val,X)	be##X##_to_cpu(val)
 #endif
 
 /* Hard-coded inode number for the root directory */
@@ -75,7 +75,11 @@ struct simplefs_super_block {
 	uint64_t block_bitmap_start;
 	uint64_t data_block_start;
 	uint32_t block_size;
-	uint32_t version; /*The last bit on=LITTLE_ENDIAN, off=BIG_ENDIAN*/
+	union {
+		char 	char_version[4];
+		uint32_t int_version; /*The last bit on=LITTLE_ENDIAN, off=BIG_ENDIAN*/
+	};
+
 	char padding[SIMPLEFS_DEFAULT_BLOCK_SIZE - (9 * sizeof(uint64_t))];
 };
 
@@ -86,31 +90,43 @@ struct simplefs_super_block_inode_info {
 
 #define cpu_super_to(endianess,sb)\
 	({\
-		sb->magic = cpu_to_##endianess(sb->magic,64);\
-		sb->block_size = cpu_to_##endianess(sb->block_size,32);\
-		sb->inodes_count = cpu_to_##endianess(sb->inodes_count,64);\
-		sb->free_blocks = cpu_to_##endianess(sb->free_blocks,64);\
+               (sb)->magic = cpu_to_##endianess((sb)->magic,64);\
+	                (sb)->block_size = cpu_to_##endianess((sb)->block_size,32);\
+	                (sb)->inodes_count = cpu_to_##endianess((sb)->inodes_count,64);\
+	                (sb)->free_blocks = cpu_to_##endianess((sb)->free_blocks,64);\
+	                (sb)->nr_blocks = cpu_to_##endianess((sb)->nr_blocks,64);\
+	                (sb)->inode_block_start = cpu_to_##endianess((sb)->inode_block_start,64);\
+	                (sb)->inode_bitmap_start = cpu_to_##endianess((sb)->inode_bitmap_start,64);\
+	                (sb)->block_bitmap_start = cpu_to_##endianess((sb)->block_bitmap_start,64);\
+	                (sb)->data_block_start = cpu_to_##endianess((sb)->data_block_start,64);\
+	                (sb)->block_size = cpu_to_##endianess((sb)->block_size,32);\
 	})
 
 #define super_to_cpu(endianess,sb)\
 	({\
-	 	sb->magic = ##endianess_to_cpu(sb->magic,64);\
-		sb->block_size = ##endianess_to_cpu0(sb->block_size,32);\
-		sb->inodes_count = ##endianess_to_cpu(sb->inodes_count,64);\
-		sb->free_blocks = ##endianess_to_cpu(sb->free_blocks,64);\
+	                (sb)->magic = endianess##_to_cpu((sb)->magic,64);\
+	                (sb)->block_size = endianess##_to_cpu((sb)->block_size,32);\
+	                (sb)->inodes_count = endianess##_to_cpu((sb)->inodes_count,64);\
+	                (sb)->free_blocks = endianess##_to_cpu((sb)->free_blocks,64);\
+	                (sb)->inode_block_start = endianess##_to_cpu((sb)->inode_block_start,64);\
+	                (sb)->inode_bitmap_start = endianess##_to_cpu((sb)->inode_bitmap_start,64);\
+	                (sb)->block_bitmap_start = endianess##_to_cpu((sb)->block_bitmap_start,64);\
+	                (sb)->data_block_start = endianess##_to_cpu((sb)->data_block_start,64);\
+	                (sb)->block_size = endianess##_to_cpu((sb)->block_size,32);\
 	 })
 
 #define cpu_inode_to(endianess,inode)\
 	({\
-	 	inode->mode = cpu_to_##endianess(inode->mode,64);\
-	 	inode->inode_no = cpu_to_##endianess(inode->inode_no,64);\
-	 	inode->data_block_no = cpu_to_##endianess(inode->data_block_no,64);\
-	 	inode->file_size = cpu_to_##endianess(inode->file_size,64);\
+               (inode)->mode = cpu_to_##endianess((inode)->mode,64);\
+                (inode)->inode_no = cpu_to_##endianess((inode)->inode_no,64);\
+                (inode)->data_block_number = cpu_to_##endianess((inode)->data_block_number,64);\
+                (inode)->file_size = cpu_to_##endianess((inode)->file_size,64);\
 	 })
+
 #define inode_to_cpu(endianess,inode)\
 	({\
-	 	inode->mode = ##endianess_to_cpu(inode->mode,64);\
-	 	inode->inode_no = ##endianess_to_cpu(inode->inode_no,64);\
-	 	inode->data_block_no = ##endianess_to_cpu(inode->data_block_no,64);\
-	 	inode->file_size = ##endianess_to_cpuinode->file_size,64);\
+	        (inode)->mode = ##endianess_to_cpu((inode)->mode,64);\
+	        (inode)->inode_no = ##endianess_to_cpu((inode)->inode_no,64);\
+	        (inode)->data_block_number = ##endianess_to_cpu((inode)->data_block_number,64);\
+	        (inode)->file_size = ##endianess_to_cpu((inode)->file_size,64);\
 	 })

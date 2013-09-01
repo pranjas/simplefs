@@ -1,6 +1,6 @@
 INCLUDE_DIRS= -I ../
 EXTRA_CFLAGS= -O2 -Wall
-CC=gcc
+#CC=gcc
 MKFS_SIMPLEFS_OBJS=mkfs-simplefs.o simplefs-lib.o
 TARGETS=mkfs-simplefs
 all: $(TARGETS)
