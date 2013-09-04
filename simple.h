@@ -1,3 +1,6 @@
+#ifndef __SIMPLE_H
+#define __SIMPLE_H
+
 #define SIMPLEFS_MAGIC 0x10032013
 #define SIMPLEFS_DEFAULT_BLOCK_SIZE 4096
 #define SIMPLEFS_FILENAME_MAXLEN 255
@@ -45,6 +48,8 @@ struct simplefs_inode {
 	uint64_t  mode;
 	uint64_t inode_no;
 	uint64_t data_block_number;
+	uint64_t c_time;
+	uint64_t m_time;
 
 	union {
 		uint64_t file_size;
@@ -88,6 +93,9 @@ struct simplefs_super_block_inode_info {
 	struct buffer_head **bh; /* Allocate this on the fly*/
 };
 
+
+#define SIMPLEFS_INODE_SIZE	(sizeof(struct simplefs_inode))
+
 #define cpu_super_to(endianess,sb)\
 	({\
                (sb)->magic = cpu_to_##endianess((sb)->magic,64);\
@@ -130,3 +138,4 @@ struct simplefs_super_block_inode_info {
 	        (inode)->data_block_number = ##endianess_to_cpu((inode)->data_block_number,64);\
 	        (inode)->file_size = ##endianess_to_cpu((inode)->file_size,64);\
 	 })
+#endif

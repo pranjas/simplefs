@@ -1,5 +1,6 @@
 #include <linux/fs.h>
 #include "simple.h"
+#include "simple_fs.h"
 static inline struct simple_fs_sb_i *SIMPLEFS_SB(struct super_block *sb)
 {
 	return sb->s_fs_info;

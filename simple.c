@@ -17,6 +17,10 @@
 #include "super.h"
 #include "simple_fs.h"
 
+#define INODE_CACHE_NAME "simplefs_inode_cache"
+
+static int nr_mounts = 0;
+
 /* A super block lock that must be used for any critical section operation on the sb,
  * such as: updating the free_blocks, inodes_count etc. */
 static DEFINE_MUTEX(simplefs_sb_lock);
@@ -736,6 +740,27 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 
 #endif
 
+struct simplefs_inode* simplefs_read_inode(uint64_t inode_no,struct super_block *sb) 
+{
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
+	int inodes_per_block = SIMPLEFS_INODE_SIZE/msblk->sb.block_size;
+	struct simplefs_inode *inode = NULL;
+try_again:
+	 inode = 
+		(struct simplefs_inode*)(msblk->inode_table[(inode_no - 1)/inodes_per_block]->b_data);
+	if(!inode) {
+		/*
+		 * One more shot at reading the buffer head of inode table
+		 * */
+		msblk->inode_table[ (inode_no - 1)/inodes_per_block ] = 
+			sb_bread(sb,msblk->sb.inode_block_start + (inode_no - 1)/inodes_per_block);
+		if (!msblk->inode_table [ (inode_no - 1)/inodes_per_block ])
+			return NULL;
+		goto try_again;
+	}		
+	return inode + ((inode_no - 1)%inodes_per_block);
+}
+
 /* This function, as the name implies, Makes the super_block valid and
  * fills filesystem specific information in the super block */
 int simplefs_fill_super(struct super_block *sb, void *data, int silent)
@@ -743,13 +768,17 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 	struct inode *root_inode;
 	struct buffer_head *bh;
 	struct simple_fs_sb_i *msblk;
+	struct simple_fs_inode_i *mroot_inode;
+	struct simplefs_inode *dummy_inode;
+	static char inode_cache_name[sizeof(INODE_CACHE_NAME) + 4 ];
+	int j = 0;
+	int blocks_per_buffer;
 
-	bh = (struct buffer_head *)sb_bread(sb,
-					    SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
+	bh = sb_bread(sb,SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
 
 	if (!bh)
 		goto failed;
-	msblk = kmalloc(sizeof(struct simple_fs_sb_i),GFP_KERNEL);
+	msblk = kzalloc(sizeof(struct simple_fs_sb_i),GFP_KERNEL);
 
 	if (!msblk)
 		goto fail_bh;
@@ -760,6 +789,7 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 		 * little endianess.
 		 * */
 		super_to_cpu(le,&msblk->sb);
+	}
 
 	printk(KERN_INFO "The magic number obtained in disk is: [%llu]\n",
 	       msblk->sb.magic);
@@ -775,8 +805,9 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 		       "simplefs seem to be formatted using a non-standard block size.");
 		return -EPERM;
 	}
-
-	msblk->inode_cachep = kmem_cache_create("simplefs_inode_cache",
+	snprintf(inode_cache_name,sizeof(inode_cache_name) - 1
+			,"%s%d",INODE_CACHE_NAME,++nr_mounts);
+	msblk->inode_cachep = kmem_cache_create(inode_cache_name,
 				sizeof(struct simple_fs_inode_i),0,
 				SLAB_HWCACHE_ALIGN,NULL);
 	if(!msblk->inode_cachep)
@@ -784,26 +815,81 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 
 	printk(KERN_INFO
 	       "simplefs filesystem of version [%u] formatted with a block size of [%u] detected in the device.\n",
-	       msblk->sb_disk.char_version[0], sb_disk->block_size);
+	       msblk->sb.char_version[0], msblk->sb.block_size);
 
 	/* A magic number that uniquely identifies our filesystem type */
 	sb->s_magic = SIMPLEFS_MAGIC;
 
 	/* For all practical purposes, we will be using this s_fs_info as the super block */
 	sb->s_fs_info = msblk;
-	sb->s_ops = &simplefs_sops;
+	sb->s_op = &simplefs_sops;
+	blocks_per_buffer = msblk->sb.block_size >> PAGE_SHIFT;
+		
+	msblk->inode_table =
+	       	kcalloc( (msblk->sb.inode_bitmap_start
+		       	- msblk->sb.inode_block_start) / blocks_per_buffer
+				,sizeof(void*),GFP_KERNEL);
+	msblk->inode_bitmap = 
+		kcalloc( (msblk->sb.block_bitmap_start
+			- msblk->sb.inode_bitmap_start) / blocks_per_buffer,
+				sizeof(void*),GFP_KERNEL);
+	msblk->block_bitmap = 
+		kcalloc( (msblk->sb.data_block_start 
+			- msblk->sb.block_bitmap_start) / blocks_per_buffer,
+				sizeof(void*),GFP_KERNEL);
+	if (!msblk->inode_table || !msblk->inode_bitmap || !msblk->block_bitmap){
+		goto fail_buffers;
+	}
+	for (j=0;
+		j < (msblk->sb.inode_bitmap_start 
+			- msblk->sb.inode_block_start)/blocks_per_buffer;j++) {
+		/*
+		 * Read in all the buffer heads for inode table
+		 * 
+		 * */
+		msblk->inode_table[j] = sb_bread(sb,msblk->sb.inode_block_start + j);
+		/*
+		 * Don't do anything yet if we are not able to read the meta
+		 * data for inode table. If it's already screwed up then you shouldn't
+		 * be mounting it in the first place. So we'll do our best what we can
+		 * to read data.
+		 * */		
+	}
+	for (j=0;
+		j < (msblk->sb.block_bitmap_start 
+			- msblk->sb.inode_bitmap_start) / blocks_per_buffer;j++) {
+		msblk->inode_bitmap[j] = sb_bread(sb,msblk->sb.inode_bitmap_start + j);
+	}
+	for(j=0;
+		j < (msblk->sb.data_block_start
+			- msblk->sb.block_bitmap_start) / blocks_per_buffer;j++) {
+		msblk->block_bitmap[j] = sb_bread(sb,msblk->sb.block_bitmap_start);
+	}
 
 	root_inode = new_inode(sb);
+	if (!root_inode) {
+		goto fail_buffers;
+	}
+	mroot_inode = SIMPLEFS_INODE(root_inode);
+	dummy_inode = simplefs_read_inode(SIMPLEFS_ROOTDIR_INODE_NUMBER,sb);
+	
+	if (!dummy_inode)
+		goto fail_inode;
+
+	memcpy(&mroot_inode->inode,dummy_inode,
+			SIMPLEFS_INODE_SIZE);
 	root_inode->i_ino = SIMPLEFS_ROOTDIR_INODE_NUMBER;
 	inode_init_owner(root_inode, NULL, S_IFDIR);
 	root_inode->i_sb = sb;
 	root_inode->i_op = &simplefs_inode_ops;
 	root_inode->i_fop = &simplefs_dir_operations;
-	root_inode->i_atime = root_inode->i_mtime = root_inode->i_ctime =
-	    CURRENT_TIME;
+	root_inode->i_atime = root_inode->i_mtime =  
+		ns_to_timespec(mroot_inode->inode.m_time);
+	root_inode->i_ctime = ns_to_timespec(mroot_inode->inode.c_time);
 
-	root_inode->i_private =
+/*	root_inode->i_private =
 	    simplefs_get_inode(sb, SIMPLEFS_ROOTDIR_INODE_NUMBER);
+	    */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
 	sb->s_root = d_make_root(root_inode);
 #else
@@ -813,6 +899,13 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 	bforget(bh);
 	return 0;
+fail_inode:
+	kmem_cache_free(msblk->inode_cachep,mroot_inode);
+fail_buffers:
+	kfree(msblk->inode_table);
+	kfree(msblk->inode_bitmap);
+	kfree(msblk->block_bitmap);
+	kmem_cache_destroy(msblk->inode_cachep);
 fail_sb:
 	kfree(msblk);
 fail_bh:

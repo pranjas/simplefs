@@ -3,7 +3,7 @@
 
 #include <linux/buffer_head.h>
 #include <linux/fs.h>
-#include "super.h"
+#include "simple.h"
 
 struct simple_fs_sb_i {
 	struct simplefs_super_block sb;
@@ -19,9 +19,8 @@ struct simple_fs_sb_i {
 	 * let's try to get this shit going.
 	 * */
 	struct buffer_head **inode_table;
-	struct buffer_head **block_bitmap;
 	struct buffer_head **inode_bitmap;
-
+	struct buffer_head **block_bitmap;
 	struct kmem_cache *inode_cachep;
 };
 

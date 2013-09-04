@@ -12,11 +12,12 @@
 #include <simplefs-lib.h>
 #include <inttypes.h>
 #include <linux/fs.h>
+#include <time.h>
 
 #define VERSION			2
 #define DEFAULT_PERC_INODES	10
 
-#define SIMPLEFS_INODE_SIZE	(sizeof(struct simplefs_inode))
+
 
 
 int main(int argc, char *argv[])
@@ -160,6 +161,7 @@ int main(int argc, char *argv[])
 	root_inode.inode_no = SIMPLEFS_ROOTDIR_INODE_NUMBER;
 	root_inode.data_block_number = /*SIMPLEFS_ROOTDIR_DATABLOCK_NUMBER*/nr_blocks_written++;
 	root_inode.dir_children_count = 1;
+	root_inode.m_time = root_inode.c_time = time(NULL);
 	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE))
 		cpu_inode_to(le,&root_inode);
 	memcpy(buffer,&root_inode,SIMPLEFS_INODE_SIZE);
@@ -168,6 +170,7 @@ int main(int argc, char *argv[])
 	welcomefile_inode.inode_no = WELCOMEFILE_INODE_NUMBER;
 	welcomefile_inode.data_block_number = nr_blocks_written++;
 	welcomefile_inode.file_size = sizeof(welcomefile_body);
+	welcomefile_inode.m_time = welcomefile_inode.c_time = time(NULL);
 	if(! (sb.char_version[0] & SIMPLEFS_ENDIANESS_LITTLE))
 		cpu_inode_to(le,&welcomefile_inode);
 	memcpy(buffer+SIMPLEFS_INODE_SIZE,&welcomefile_inode,SIMPLEFS_INODE_SIZE);
