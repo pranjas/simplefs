@@ -890,7 +890,7 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 /*	root_inode->i_private =
 	    simplefs_get_inode(sb, SIMPLEFS_ROOTDIR_INODE_NUMBER);
 	    */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
 	sb->s_root = d_make_root(root_inode);
 #else
 	sb->s_root = d_alloc_root(root_inode);
