@@ -3,6 +3,7 @@
 
 #include <linux/buffer_head.h>
 #include <linux/fs.h>
+#include <linux/mutex.h>
 #include "simple.h"
 
 struct simple_fs_sb_i {
@@ -22,6 +23,7 @@ struct simple_fs_sb_i {
 	struct buffer_head **inode_bitmap;
 	struct buffer_head **block_bitmap;
 	struct kmem_cache *inode_cachep;
+	struct mutex 		sb_mutex;
 };
 
 struct simple_fs_inode_i {

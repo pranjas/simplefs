@@ -896,7 +896,8 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_root = d_alloc_root(root_inode);
 #endif
 	if (!sb->s_root)
-		return -ENOMEM;
+		goto fail_inode;
+	mutex_init(&msblk->sb_mutex);
 	bforget(bh);
 	return 0;
 fail_inode:
@@ -979,3 +980,4 @@ module_exit(simplefs_exit);
 
 MODULE_LICENSE("CC0");
 MODULE_AUTHOR("Sankar P");
+MODULE_AUTHOR("Pranay Kr. Srivastava");

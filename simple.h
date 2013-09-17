@@ -21,6 +21,13 @@
 #define be_to_cpu(val,X)	be##X##_to_cpu(val)
 #endif
 
+#ifdef __KERNEL__
+#ifdef SIMPLE_DEBUG
+#define SFSDBG(X,fmt...)	printk(KERN_INFO  X,##fmt)
+#else
+#define SFSDBG(X,fmt...)
+#endif
+
 /* Hard-coded inode number for the root directory */
 const int SIMPLEFS_ROOTDIR_INODE_NUMBER = 1;
 
@@ -129,13 +136,17 @@ struct simplefs_super_block_inode_info {
                 (inode)->inode_no = cpu_to_##endianess((inode)->inode_no,64);\
                 (inode)->data_block_number = cpu_to_##endianess((inode)->data_block_number,64);\
                 (inode)->file_size = cpu_to_##endianess((inode)->file_size,64);\
+				(inode)->c_time = cpu_to_##endianess((inode)->c_time,64);\
+				(inode)->m_time = cpu_to_##endianess((inode)->m_time,64);\
 	 })
 
 #define inode_to_cpu(endianess,inode)\
 	({\
-	        (inode)->mode = ##endianess_to_cpu((inode)->mode,64);\
-	        (inode)->inode_no = ##endianess_to_cpu((inode)->inode_no,64);\
-	        (inode)->data_block_number = ##endianess_to_cpu((inode)->data_block_number,64);\
-	        (inode)->file_size = ##endianess_to_cpu((inode)->file_size,64);\
+	        (inode)->mode = endianess_to_cpu((inode)->mode,64);\
+	        (inode)->inode_no = endianess_to_cpu((inode)->inode_no,64);\
+	        (inode)->data_block_number = endianess_to_cpu((inode)->data_block_number,64);\
+	        (inode)->file_size = endianess_to_cpu((inode)->file_size,64);\
+			(inode)->c_time = endianess_to_cpu((inode)->c_time,64);\
+			(inode)->m_time = endianess_to_cpu((inode)->m_time,64);\
 	 })
 #endif
