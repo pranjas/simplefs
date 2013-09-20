@@ -27,6 +27,7 @@
 #else
 #define SFSDBG(X,fmt...)
 #endif
+#endif /*__KERNEL__*/
 
 /* Hard-coded inode number for the root directory */
 const int SIMPLEFS_ROOTDIR_INODE_NUMBER = 1;
@@ -57,12 +58,14 @@ struct simplefs_inode {
 	uint64_t data_block_number;
 	uint64_t c_time;
 	uint64_t m_time;
+	uint64_t indirect_block_number; /*All indirect blocks are recorded here*/
 
 	union {
 		uint64_t file_size;
 		uint64_t dir_children_count;
 	};
 };
+
 
 const int SIMPLEFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED = 64;
 /* min (

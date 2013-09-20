@@ -32,5 +32,6 @@ struct simple_fs_inode_i {
 	/*
 	 * Add more members as and when required.
 	 * */
+	struct buffer_head *indirect_block;
 };
 #endif

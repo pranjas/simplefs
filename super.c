@@ -1,6 +1,25 @@
 #include <linux/fs.h>
 #include "super.h"
 
+void simplefs_sync_metadata(struct super_block *sb)
+{
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
+	/*
+	 * Start with inodes.
+	 */
+	struct buffer_head **walker = msblk->inode_table;
+	struct buffer_head *bh = *walker;
+	while(walker) {	
+		do
+		{
+			if(!buffer_uptodate(bh))
+				sync_dirty_buffer(bh);
+			bh=bh->b_this_page;
+		}while(bh->b_this_page != *walker);
+		walker++;
+	}
+}
+
 static struct inode* simplefs_alloc_inode(struct super_block *sb) 
 {
 	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
@@ -132,7 +151,7 @@ out_failed:
 		 */
 		block_no = block_start - ((
 				(sb_buffer_bitmap->b_size * block_start_buffer_offset)
-					+(PAGE_SIZE * block_start_bitmap_index))) << 3;		
+					+(PAGE_SIZE * block_start_bitmap_index))) * 8;		
 		/*
 		 * Move to the correct buffer head within the page.
 		 */
@@ -196,27 +215,61 @@ static int get_simplefs_block(struct inode *vfs_inode, sector_t iblock,
 {
 	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(vfs_inode->i_sb);
 	struct simple_fs_inode_i *minode = SIMPLEFS_INODE(vfs_inode);
-	uint64_t file_size = i_size_read(vfs_inode);
-	int blocks_alloced = file_size/msblk->sb.block_size +
-						(file_size%msblk->sb.block_size?1:0);
-	int start_block = -1;
+	uint64_t mapped_block = -1;
+	
+	if(iblock > msblk->sb.block_size/sizeof(uint64_t))
+		goto fail_get_block;
+	
 	if(create) {
-		 /* Holes not yet supported*/
-		 if(blocks_alloced < iblock) {
-			/*
-		 	 * Allocate blocks for this inode.
-			 */
-			if( (start_block = allocate_data_block(vfs_inode,iblock - blocks_alloced)) > 0) {
-				/*
-				 * We've got exactly iblock - blocks_alloced newer blocks
-				 */	
+		/* Do we already have allocated the indirect block.
+		 * If yes then all we need to do is check the block location
+		 * for being 0 within that.
+		 */
+		if(iblock) {
+			if(minode->inode.indirect_block_number) {
+				if(!minode->indirect_block) {
+					minode->indirect_block =
+						sb_bread(vfs_inode->i_sb,
+							minode->inode.indirect_block_number);
+					if(!minode->indirect_block)
+						goto fail_get_block;
+				}
+				uint64_t *block_offset = ((uint64_t*)(minode->indirect_block->b_data) + (iblock-1));
+				mapped_block = le64_to_cpu(*block_offset);
+				if(!mapped_block) {
+					mapped_block = allocate_data_blocks(vfs_inode,1);
+					if (!mapped_block) {
+						SFSDBG(KERN_INFO "Error allocating indirect data block %s %d\n"
+							,__FUNCTION__,__LINE__);
+						goto fail_get_block;
+					}
+				}
+				*block_offset = cpu_to_le64(mapped_block);
+				mark_buffer_dirty(minode->indirect_block);
+				mapped_block = block_offset;
 			}
+			else { /*Allocate that indirect block and the block within*/
+				minode->inode.indirect_block_number = allocate_data_blocks(vfs_inode,1);
+				if(!minode->inode.indirect_block_number) {
+					SFSDBG(KERN_INFO "Error allocating indirect block %s %d\n"
+							,__FUNCTION__,__LINE__);
+					goto fail_get_block;
+				}
+			}
+		}
+		else { /*This is the first block for the file*/
+			
 		}
 	}
 	/*
 	 * Find the mapping but don't create it.
 	 */
+				set_buffer_new(bh_result);
+				map_bh(bh_result,vfs_inode->i_sb,block_offset);
 
+	return 0;
+fail_get_block:
+	return -1;
 }
 struct address_space_operations simplefs_aops ={
 	.readpage 	= simplefs_read_page;
