@@ -1,15 +1,12 @@
 #include <linux/fs.h>
 #include "super.h"
 
-void simplefs_sync_metadata(struct super_block *sb)
+
+static void simplefs_sync_metadata_buffer(struct bufffer_head **bh_table)
 {
-	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
-	/*
-	 * Start with inodes.
-	 */
-	struct buffer_head **walker = msblk->inode_table;
-	struct buffer_head *bh = *walker;
+	struct buffer_head **walker = *bh_table;
 	while(walker) {	
+		struct buffer_head *bh = *walker;
 		do
 		{
 			if(!buffer_uptodate(bh))
@@ -18,6 +15,16 @@ void simplefs_sync_metadata(struct super_block *sb)
 		}while(bh->b_this_page != *walker);
 		walker++;
 	}
+}
+void simplefs_sync_metadata(struct super_block *sb)
+{
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
+	/*
+	 * Start with inodes.
+	 */
+	simplefs_sync_metadata_buffer(msblk->inode_table);
+	simplefs_sync_metadata_buffer(msblk->inode_bitmap);
+	simeplfs_sync_metadata_buffer(msblk->block_bitmap);
 }
 
 static struct inode* simplefs_alloc_inode(struct super_block *sb) 
@@ -33,7 +40,12 @@ static struct inode* simplefs_alloc_inode(struct super_block *sb)
 static void simplefs_destroy_inode(struct inode *vfs_inode) 
 {
 	struct simple_fs_inode_i *inode = SIMPLEFS_INODE(vfs_inode);
-	struct simple_fs_sb_i *sb = SIMPLEFS_SB(vfs_inode->i_sb);	
+	struct simple_fs_sb_i *sb = SIMPLEFS_SB(vfs_inode->i_sb);
+	if (inode->indirect_block) {
+		if(!buffer_uptodate(inode->indirect_block))
+			sync_dirty_buffer(inode->indirect_block);
+		bforget(inode->indirect_block);
+	}
 	kmem_cache_free(sb->inode_cachep,inode);
 }
 
@@ -99,7 +111,6 @@ static int allocate_data_blocks(struct inode *vfs_inode,int nr_blocks)
 	int block_start_bitmap_index = 0;
 	if(!nr_blocks)
 		return 0;
-
 	mutex_lock(&msblk->sb_mutex);
 new_bitmap_buffer:
 		sb_buffer_bitmap = msblk->block_bitmap[bitmap_index];
@@ -136,7 +147,7 @@ allocate_block:
 			if(nr_blocks)
 				goto allocate_block;
 		}
-	
+	simplefs_sync_metadata(sb);
 	mutex_unlock(&msblk->sb_mutex);
 	return block_start; /*Return starting block number of the allocated blocks*/
 out_failed:
@@ -182,13 +193,15 @@ out_failed:
 			}
 		}
 	}
+	simplefs_sync_metadata(sb);
 	mutex_unlock(msblk->sb_mutex);
 	return 0;
 }
 
+
 /*
  * This one is the heart and soul. Most of the stuff is taken care of
- * by fslib. All we need to do is write this one here and fill up the
+ * by libfs. All we need to do is write this one here and fill up the
  * buffer head with the information it wants. 
  *
  * This buffer head is actually a local variable, see mpage_readpages
@@ -210,8 +223,8 @@ out_failed:
  * however mpage_readpages then sends it to "confused". Arrhh.....
  */
 
-static int get_simplefs_block(struct inode *vfs_inode, sector_t iblock,
-								 struct buffer_head *bh_result, int create)
+static int simplefs_get_block(struct inode *vfs_inode, sector_t iblock,
+				struct buffer_head *bh_result, int create)
 {
 	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(vfs_inode->i_sb);
 	struct simple_fs_inode_i *minode = SIMPLEFS_INODE(vfs_inode);
@@ -226,6 +239,7 @@ static int get_simplefs_block(struct inode *vfs_inode, sector_t iblock,
 		 * for being 0 within that.
 		 */
 		if(iblock) {
+allocate_indirect_block:
 			if(minode->inode.indirect_block_number) {
 				if(!minode->indirect_block) {
 					minode->indirect_block =
@@ -234,7 +248,8 @@ static int get_simplefs_block(struct inode *vfs_inode, sector_t iblock,
 					if(!minode->indirect_block)
 						goto fail_get_block;
 				}
-				uint64_t *block_offset = ((uint64_t*)(minode->indirect_block->b_data) + (iblock-1));
+				uint64_t *block_offset = 
+					((uint64_t*)(minode->indirect_block->b_data) + (iblock-1));
 				mapped_block = le64_to_cpu(*block_offset);
 				if(!mapped_block) {
 					mapped_block = allocate_data_blocks(vfs_inode,1);
@@ -255,22 +270,114 @@ static int get_simplefs_block(struct inode *vfs_inode, sector_t iblock,
 							,__FUNCTION__,__LINE__);
 					goto fail_get_block;
 				}
+				else
+					goto allocate_indirect_block;
 			}
 		}
 		else { /*This is the first block for the file*/
-			
+			if( minode->inode.data_block_number ){
+				mapped_block = le64_to_cpu(minode->inode.data_block_number);
+			}
+			else
+			{
+				minode->inode.data_block_number = allocate_data_blocks(vfs_inode,1);
+				if(!minode->inode.data_block_number) {
+					SFSDBG(KERN_INFO "Error allocating direct block %s %d\n"
+							,__FUNCTION__,__LINE__);
+					goto fail_get_block;
+				}
+				mapped_block = minode->inode.data_block_number;
+				minode->inode.data_block_number = cpu_to_le64(
+						minode->inode.data_block_number);
+			}
 		}
 	}
-	/*
-	 * Find the mapping but don't create it.
-	 */
-				set_buffer_new(bh_result);
-				map_bh(bh_result,vfs_inode->i_sb,block_offset);
-
+	else {
+	
+		/*
+		 * Find the mapping but don't create it.
+		 */
+		if(iblock) {
+			if(minode->inode.indirect_block_number) {
+				if(!minode->indirect_block) {
+					minode->indirect_block =
+						sb_bread(vfs_inode->i_sb,
+							minode->inode.indirect_block_number);
+					if(!minode->indirect_block)
+						goto fail_get_block;
+				}
+				uint64_t *block_offset = 
+					((uint64_t*)(minode->indirect_block->b_data) + (iblock-1));
+				mapped_block = le64_to_cpu(*block_offset);
+				if(!mapped_block)
+					goto fail_get_block;
+			}
+			else
+				goto fail_get_block;
+		}
+		else {
+			if(!minode->inode.data_block_number)
+				goto fail_get_block;
+			mapped_block = le64_to_cpu(minode->inode.data_block_number);
+		}
+	}
+	set_buffer_new(bh_result);
+	map_bh(bh_result,vfs_inode->i_sb,mapped_block);
 	return 0;
 fail_get_block:
-	return -1;
+	return -EOF;
 }
+
+static int simplefs_read_pages(struct file *filp,struct address_space *mapping
+					,struct list_head *pages,unsigned nr_pages)
+{
+	SFSDBG(KERN_INFO "Read pages started \n");
+	dump_stack();
+	return mpage_readpages(mapping,pages,nr_pages,simplefs_get_block);
+}
+static int simplefs_write_pages(struct address_space *mapping,
+				struct writeback_control *wbc)
+{
+	SFSDBG(KERN_INFO "Write pages started \n");
+	dump_stack();
+	return mpage_writepages(mapping,wbc,simplefs_get_block);
+}
+
+static int simplefs_read_page(struct file *filp,struct page *page)
+{
+	SFSDBG(KERN_INFO "Read page started \n");
+	dump_stack();
+	return mpage_readpage(page,simplefs_get_block);
+}
+
+static int simplefs_write_page(struct page *page,struct writeback_control *wbc)
+{
+	SFSDBG(KERN_INFO "Write page started \n");
+	dump_stack();
+	return mpage_writepage(page,simplefs_get_block,wbc);
+}
+
+int simplefs_write_begin(struct file *, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata)
+{
+	SFSDBG(KERN_INFO "Write begin started \n");
+	dump_stack();
+	return block_write_begin(mapping,pos,
+			len,flags,pagep,simplefs_get_block);
+}
+
+int simplefs_write_end(struct file *, struct address_space *mapping,
+                               loff_t pos, unsigned len, unsigned copied,
+                                struct page *page, void *fsdata)
+{
+	SFSDBG(KERN_INFO "Write end started \n");
+	dump_stack();
+	return block_write_end(mapping,pos,
+			len,copied,page,fsdata);
+}
+
+
 struct address_space_operations simplefs_aops ={
 	.readpage 	= simplefs_read_page;
 	.readpages 	= simplefs_read_pages;

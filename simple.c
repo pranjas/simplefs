@@ -392,13 +392,22 @@ ssize_t simplefs_write(struct file * filp, const char __user * buf, size_t len,
 }
 
 const struct file_operations simplefs_file_operations = {
-	.read = simplefs_read,
+/*	.read = simplefs_read,
 	.write = simplefs_write,
+	*/
+	.aio_read = generic_file_aio_read,
+	.aio_write = generic_file_aio_write,
+	.llseek = generic_file_llseek,
+	.mmap = generic_file_mmap,
+	.owner = THIS_MODULE
 };
 
 const struct file_operations simplefs_dir_operations = {
 	.owner = THIS_MODULE,
 	.readdir = simplefs_readdir,
+	.read = generic_read_dir,
+	.llseek = generic_file_llseek,
+
 };
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
