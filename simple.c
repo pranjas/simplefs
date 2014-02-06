@@ -687,6 +687,92 @@ static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
 	return simplefs_create_fs_object(dir, dentry, S_IFDIR | mode);
 }
 
+
+static uint64_t simplefs_locate_inode
+		(struct super_block *sb,size_t len,
+		 const char *buffer, const char *name)
+{
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
+	size_t nr_inodes_per_block = le32_to_cpu(msblk->sb.block_size)/
+					SIMPLEFS_INODE_SIZE;
+	if(len < DIR_RECORD_BASE_SIZE)
+		return (uint64_t)-1;
+	while(len && len >= DIR_RECORD_BASE_SIZE) {
+		struct simplefs_dir_record_i *dir_entry = 
+			(struct simplefs_dir_record_i*)buffer;
+		if(!strncmp(dir_entry->filename,name,strlen(name))) {
+			return le64_to_cpu(dir_entry->inode_no);
+		}
+		len -= dir_record_len(dir_entry);
+		buffer += dir_record_len(dir_entry);
+	}
+return 0;
+}
+
+struct dentry* simplefs_lookup(struct inode *parent,
+					struct dentry *child,
+					struct nameidata *nameidata)
+{
+	struct simple_fs_inode_i *minode = SIMPLEFS_INODE(parent);
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(inode->i_sb);
+	struct dentry *dentry = NULL;
+	struct page *page = NULL;
+	pgoff_t pg_index = 0;
+
+	/*
+	 * Lookup should be done in a more faster way, currently the
+	 * only way is to linearly search for the directory entries.
+	 * However we can't do that optimization over whole directory
+	 * since directories can be huge and we don't want to alter
+	 * other blocks of directory.
+	 * Will think it over what can be done.
+	 * */
+	uint64_t dir_count = le64_to_cpu(minode->inode.dir_children_count);
+	uint64_t inode_no = (uint64_t)-1;
+	mutex_lock(&parent->i_mutex);	
+		do {
+			if(!dir_count)
+				break;
+			page = read_mapping_page(parent->i_mapping,
+							pg_index,NULL);
+			if(IS_ERR(page))
+				break;
+			kmap(page);
+			inode_no = 
+				simplefs_locate_inode(sb,PAGE_SIZE,
+						page_address(page),
+						child->d_name);
+			if (inode_no > 0 ) {
+				struct simplefs_inode *core_inode 
+					= simplefs_read_inode(inode_no,inode->i_sb);
+				if (!core_inode) {
+					kunmap(page);
+					break;
+				}
+				struct inode *new_inode = new_inode(inode_no);
+				struct simple_fs_inode_i *new_sfs_inode = SIMPLEFS_INODE(new_sfs_inode);
+				memcpy(&new_sfs_inode->inode,core_inode,SIMPLEFS_INODE_SIZE);
+				if (!new_inode) {
+					kunmap(page);
+					break;
+				}
+				new_inode->i_mode = (umode_t)le64_to_cpu(new_sfs_inode->inode.mode);
+				new_inode->i_atime = CURRENT_TIME;
+				new_inode->i_ctime = ns_to_timespec(le64_to_cpu(new_sfs_inode->inode.ctime));
+				new_inode->i_mtime = ns_to_timespec(le64_to_cpu(new_sfs_inode->inode.mtime));
+				if(new_inode->i_mode & S_IFDIR)
+					new_inode->i_op = &simplefs_dir_operations;
+				else
+					new_inode->i_op = &simplefs_file_operations;
+				new_inode->i_mapping->a_ops = &simplefs_aops;
+				d_add(dentry,new_inode);
+			}
+			kunmap(page);
+		}while(1);
+	mutex_unlock(&parent->i_mutex);
+}
+
+#if 0
 struct dentry *simplefs_lookup(struct inode *parent_inode,
 			       struct dentry *child_dentry, struct nameidata *nameidata)
 {
@@ -746,9 +832,17 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 	return NULL;
 
 }
+#endif
 
 #endif
 
+struct simplefs_inode* simplefs_lookup_inode(const char *name,struct inode *parent)
+{
+	struct simple_fs_inode_i *minode = SIMPLEFS_INODE(parent);
+	if(!S_ISDIR(minode->mode))
+		return NULL;
+
+}
 struct simplefs_inode* simplefs_read_inode(uint64_t inode_no,struct super_block *sb) 
 {
 	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
@@ -761,9 +855,9 @@ try_again:
 		/*
 		 * One more shot at reading the buffer head of inode table
 		 * */
-		msblk->inode_table[ (inode_no - 1)/inodes_per_block ] = 
+		msblk->inode_table[(inode_no - 1)/inodes_per_block ] = 
 			sb_bread(sb,msblk->sb.inode_block_start + (inode_no - 1)/inodes_per_block);
-		if (!msblk->inode_table [ (inode_no - 1)/inodes_per_block ])
+		if (!msblk->inode_table[ (inode_no - 1)/inodes_per_block ])
 			return NULL;
 		goto try_again;
 	}		
@@ -832,26 +926,26 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 	/* For all practical purposes, we will be using this s_fs_info as the super block */
 	sb->s_fs_info = msblk;
 	sb->s_op = &simplefs_sops;
-	blocks_per_buffer = msblk->sb.block_size >> PAGE_SHIFT;
+	blocks_per_buffer = /*msblk->sb.block_size >> PAGE_SHIFT*/1;
 		
 	msblk->inode_table =
 	       	kcalloc( (msblk->sb.inode_bitmap_start
-		       	- msblk->sb.inode_block_start) / blocks_per_buffer
+		       	- msblk->sb.inode_block_start + 1) / blocks_per_buffer + 1 
 				,sizeof(void*),GFP_KERNEL);
 	msblk->inode_bitmap = 
 		kcalloc( (msblk->sb.block_bitmap_start
-			- msblk->sb.inode_bitmap_start) / blocks_per_buffer,
+			- msblk->sb.inode_bitmap_start + 1) / blocks_per_buffer + 1 ,
 				sizeof(void*),GFP_KERNEL);
 	msblk->block_bitmap = 
 		kcalloc( (msblk->sb.data_block_start 
-			- msblk->sb.block_bitmap_start) / blocks_per_buffer,
+			- msblk->sb.block_bitmap_start + 1) / blocks_per_buffer + 1,
 				sizeof(void*),GFP_KERNEL);
 	if (!msblk->inode_table || !msblk->inode_bitmap || !msblk->block_bitmap){
 		goto fail_buffers;
 	}
 	for (j=0;
 		j < (msblk->sb.inode_bitmap_start 
-			- msblk->sb.inode_block_start)/blocks_per_buffer;j++) {
+			- msblk->sb.inode_block_start+1)/blocks_per_buffer+1;j++) {
 		/*
 		 * Read in all the buffer heads for inode table
 		 * 
@@ -866,12 +960,12 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 	for (j=0;
 		j < (msblk->sb.block_bitmap_start 
-			- msblk->sb.inode_bitmap_start) / blocks_per_buffer;j++) {
+			- msblk->sb.inode_bitmap_start + 1) / blocks_per_buffer + 1;j++) {
 		msblk->inode_bitmap[j] = sb_bread(sb,msblk->sb.inode_bitmap_start + j);
 	}
 	for(j=0;
 		j < (msblk->sb.data_block_start
-			- msblk->sb.block_bitmap_start) / blocks_per_buffer;j++) {
+			- msblk->sb.block_bitmap_start + 1) / blocks_per_buffer + 1;j++) {
 		msblk->block_bitmap[j] = sb_bread(sb,msblk->sb.block_bitmap_start);
 	}
 
@@ -938,12 +1032,18 @@ static struct dentry *simplefs_mount(struct file_system_type *fs_type,
 	else
 		printk(KERN_INFO "simplefs is succesfully mounted on [%s]\n",
 		       dev_name);
-
 	return ret;
 }
 
-static void simplefs_kill_superblock(struct super_block *s)
+static void simplefs_kill_superblock(struct super_block *sb)
 {
+	struct simple_fs_sb_i *msblk = SIMPLEFS_SB(sb);
+	simplefs_sync_metadata(sb);
+	kfree(msblk->inode_table);
+	kfree(msblk->inode_bitmap);
+	kfree(msblk->block_bitmap);
+	kmem_cache_destroy(msblk->inode_cachep);
+	kfree(msblk);
 	printk(KERN_INFO
 	       "simplefs superblock is destroyed. Unmount succesful.\n");
 	/* This is just a dummy function as of now. As our filesystem gets matured,

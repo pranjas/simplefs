@@ -47,8 +47,14 @@ const int SIMPLEFS_ROOTDIR_DATABLOCK_NUMBER = 2;
 struct simplefs_dir_record {
 	uint64_t inode_no;
 	uint8_t	 name_len;
-	char filename[SIMPLEFS_FILENAME_MAXLEN];
+	char filename[SIMPLEFS_FILENAME_MAXLEN + 1];
 };
+struct simplefs_dir_record_i {
+	uint64_t inode_no;
+	uint8_t name_len;
+	char filename[0];
+};
+
 #define DIR_RECORD_BASE_SIZE		(sizeof(struct simplefs_dir_record) - SIMPLEFS_FILENAME_MAXLEN)
 #define dir_record_len(dir_record)	(DIR_RECORD_BASE_SIZE + (dir_record)->name_len)
 

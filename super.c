@@ -367,13 +367,13 @@ int simplefs_write_begin(struct file *, struct address_space *mapping,
 			len,flags,pagep,simplefs_get_block);
 }
 
-int simplefs_write_end(struct file *, struct address_space *mapping,
+int simplefs_write_end(struct file *file, struct address_space *mapping,
                                loff_t pos, unsigned len, unsigned copied,
                                 struct page *page, void *fsdata)
 {
 	SFSDBG(KERN_INFO "Write end started \n");
 	dump_stack();
-	return block_write_end(mapping,pos,
+	return generic_write_end(file,mapping,pos,
 			len,copied,page,fsdata);
 }
 
